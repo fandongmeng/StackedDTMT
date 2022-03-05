@@ -1,5 +1,5 @@
 # StackedDTMT
-Stacked Encoder Enhanced Deep Transition RNMT
+Stacked Encoder Enhanced Deep Transition RNMT (https://arxiv.org/abs/1812.07807).
 
 ## Contents
 * [Introduction](#introduction)
