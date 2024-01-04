@@ -28,7 +28,7 @@ def to_example(dictionary):
     """ Convert python dictionary to tf.train.Example """
     features = {}
 
-    for (k, v) in six.iteritems(dictionary):
+    for (k, v) in six.items(dictionary):
         if not v:
             raise ValueError("Empty generated field: %s", str((k, v)))
 
@@ -88,7 +88,7 @@ def convert_to_record(inputs, vocab, output_name, output_dir, num_shards,
     output_files = []
     writers = []
 
-    for shard in xrange(num_shards):
+    for shard in range(num_shards):
         output_filename = "%s-%.5d-of-%.5d" % (output_name, shard, num_shards)
         output_file = os.path.join(output_dir, output_filename)
         output_files.append(output_file)

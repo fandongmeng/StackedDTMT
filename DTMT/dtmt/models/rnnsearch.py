@@ -15,6 +15,36 @@ def _copy_through(time, length, output, new_output):
     copy_cond = (time >= length)
     return tf.where(copy_cond, output, new_output)
 
+def highway(input, hidden, hidden_size, scope=None):
+    with tf.variable_scope(scope or "highway"):
+        weight = tf.nn.sigmoid(layers.nn.linear(tf.concat([input, hidden], axis=2), hidden_size, True, False,
+                                                     scope="highway_gate"))
+        output = (1-weight) * input + weight * hidden
+        return output
+
+
+def self_attention(x, bias, hidden_size, keep_prob=None):
+    with tf.variable_scope("self_attention"):
+        #x = layers.attention.add_timing_signal(x)
+        y = layers.attention.multihead_attention(
+                        x,
+                        None,
+                        bias,
+                        8,
+                        hidden_size,
+                        hidden_size,
+                        hidden_size,
+                        keep_prob
+                    )
+        y = y["outputs"]
+        if keep_prob and keep_prob < 1.0:
+            y = tf.nn.dropout(y, keep_prob)
+
+        y = highway(x, y, hidden_size)
+        y = layers.nn.layer_norm(y)
+       
+    return y
+
 
 def _gru_encoder(cell, inputs, sequence_length, initial_state, dtype=None):
     # Assume that the underlying cell is GRUCell-like
@@ -38,6 +68,7 @@ def _gru_encoder(cell, inputs, sequence_length, initial_state, dtype=None):
     def loop_func(t, out_ta, state):
         inp_t = input_ta.read(t)
         cell_output, new_state = cell(inp_t, state)
+        #cell_output, new_state = compressed_gru(new_state, state)
         cell_output = _copy_through(t, sequence_length, zero_output,
                                     cell_output)
         new_state = _copy_through(t, sequence_length, state, new_state)
@@ -61,39 +92,47 @@ def _gru_encoder(cell, inputs, sequence_length, initial_state, dtype=None):
     return all_output, final_state
 
 
-def _encoder(cell_fw0, cell_fw1, cell_bw0, cell_bw1, inputs, sequence_length, dtype=None,
+def _encoder(cell_fw0, cell_fw1, cell_bw0, cell_bw1, inputs, sequence_length, attention_dropout, dtype=None,
              scope=None):
     with tf.variable_scope(scope or "encoder",
                            values=[inputs, sequence_length]):
         inputs_fw = inputs
         inputs_bw = tf.reverse_sequence(inputs, sequence_length,
                                         batch_axis=0, seq_axis=1)
-
+        src_mask = tf.sequence_mask(sequence_length,
+                                maxlen=tf.shape(inputs)[1],
+                                dtype=tf.float32)
+        enc_attn_bias = layers.attention.attention_bias(src_mask, "masking")
+        
+ 
         with tf.variable_scope("forward0"):
             output_fw, state_fw = _gru_encoder(cell_fw0, inputs_fw,
                                                sequence_length, None,
                                                dtype=dtype)
-	    inputs_fw = tf.reverse_sequence(output_fw, sequence_length,
-					    batch_axis=0, seq_axis=1)
-	with tf.variable_scope("forward1"):
-	    output_fw, state_fw = _gru_encoder(cell_fw1, inputs_fw,
+            inputs_fw = tf.reverse_sequence(output_fw, sequence_length,
+                                            batch_axis=0, seq_axis=1)
+            inputs_fw = self_attention(inputs_fw, enc_attn_bias, cell_fw0.output_size, 1.0 - attention_dropout)
+        with tf.variable_scope("forward1"):
+            output_fw, state_fw = _gru_encoder(cell_fw1, inputs_fw,
                                                sequence_length, state_fw,
                                                dtype=dtype)
-	    output_fw = tf.reverse_sequence(output_fw, sequence_length,
-					    batch_axis=0, seq_axis=1)
-
+            output_fw = tf.reverse_sequence(output_fw, sequence_length,
+                                            batch_axis=0, seq_axis=1)
+ 
         with tf.variable_scope("backward0"):
             output_bw, state_bw = _gru_encoder(cell_bw0, inputs_bw,
                                                sequence_length, None,
                                                dtype=dtype)
             output_bw = tf.reverse_sequence(output_bw, sequence_length,
                                             batch_axis=0, seq_axis=1)
-	with tf.variable_scope("backward1"):
-	    inputs_bw = output_bw
-	    output_bw, state_bw = _gru_encoder(cell_bw1, inputs_bw,
+
+            output_bw = self_attention(output_bw, enc_attn_bias, cell_fw0.output_size, 1.0 - attention_dropout)
+        with tf.variable_scope("backward1"):
+            inputs_bw = output_bw
+            output_bw, state_bw = _gru_encoder(cell_bw1, inputs_bw,
                                                sequence_length, state_bw,
                                                dtype=dtype)
-
+ 
         results = {
             "annotation": tf.concat([output_fw, output_bw], axis=2),
             "outputs": {
@@ -105,7 +144,6 @@ def _encoder(cell_fw0, cell_fw1, cell_bw0, cell_bw1, inputs, sequence_length, dt
                 "backward": state_bw
             }
         }
-
         return results
 
 
@@ -126,14 +164,14 @@ def _decoder(cell_cond, cell, inputs, memory, sequence_length, initial_state, in
                                     dtype=tf.float32)
         bias = layers.attention.attention_bias(mem_mask, "masking")
         bias = tf.squeeze(bias, axis=[1])
-        #bias = tf.squeeze(bias, axis=[1, 2])
+        # bias = tf.squeeze(bias, axis=[1, 2])
         cache = layers.attention.attention_mhead(None, memory, None, output_size)
 
         input_ta = tf.TensorArray(tf.float32, time_steps,
                                   tensor_array_name="input_array")
         output_ta = tf.TensorArray(tf.float32, time_steps,
                                    tensor_array_name="output_array")
-	outputstate_ta = tf.TensorArray(tf.float32, time_steps,
+        outputstate_ta = tf.TensorArray(tf.float32, time_steps,
                                         tensor_array_name="outputstate_array")
         value_ta = tf.TensorArray(tf.float32, time_steps,
                                   tensor_array_name="value_array")
@@ -142,11 +180,12 @@ def _decoder(cell_cond, cell, inputs, memory, sequence_length, initial_state, in
         input_ta = input_ta.unstack(inputs)
 
         if incre_state is not None:
-	    initial_state = incre_state
+            initial_state = incre_state
 
         def loop_func(t, out_ta, att_ta, val_ta, state, outstate_ta, cache_key):
             inp_t = input_ta.read(t)
             output1, state1 = cell_cond(inp_t, state)
+            #output1, state1 = compressed_gru_cond(state1, state)
             state1 = _copy_through(t, sequence_length["target"], state,
                                    state1)
             results = layers.attention.attention_mhead(state1, memory, bias,
@@ -157,6 +196,7 @@ def _decoder(cell_cond, cell, inputs, memory, sequence_length, initial_state, in
             context = results["value"]
             cell_input = [context]
             cell_output, new_state = cell(cell_input, state1)
+            #cell_output, new_state = compressed_gru_dec(new_state, state1)
 
             cell_output = _copy_through(t, sequence_length["target"],
                                         zero_output, cell_output)
@@ -200,17 +240,17 @@ def _decoder(cell_cond, cell, inputs, memory, sequence_length, initial_state, in
         result = {
             "outputs": final_output,
             "values": final_value,
-            "state": final_state[:,-1,:]
+            "state": final_state[:, -1, :]
         }
 
     return result
 
 
 def encoding_graph(features, mode, params):
-
     if mode != "train":
         params.dropout = 0.0
         params.rnn_dropout = 0.0
+        params.attention_dropout = 0.0
         params.use_variational_dropout = False
         params.label_smoothing = 0.0
 
@@ -234,6 +274,13 @@ def encoding_graph(features, mode, params):
     cell_bw0 = layers.rnn_cell.DL4MTGRULAUTransiLNCell(params.hidden_size, 1.0 - params.rnn_dropout)
     cell_bw1 = layers.rnn_cell.DL4MTGRULAUTransiLNCell(params.hidden_size, 1.0 - params.rnn_dropout)
 
+    compressed_gru_fw0 = layers.rnn_cell.LegacyGRUCell(params.hidden_size)
+    compressed_gru_bw0 = layers.rnn_cell.LegacyGRUCell(params.hidden_size)
+    compressed_gru_fw1 = layers.rnn_cell.LegacyGRUCell(params.hidden_size)
+    compressed_gru_bw1 = layers.rnn_cell.LegacyGRUCell(params.hidden_size)
+
+    #compressed_grus = [compressed_gru_fw0, compressed_gru_fw1, compressed_gru_bw0, compressed_gru_bw1]
+
     if params.use_variational_dropout:
         cell_fw0 = tf.nn.rnn_cell.DropoutWrapper(
             cell_fw0,
@@ -255,7 +302,7 @@ def encoding_graph(features, mode, params):
         )
 
     encoder_output = _encoder(cell_fw0, cell_fw1, cell_bw0, cell_bw1, src_inputs,
-                              features["source_length"])
+                              features["source_length"], params.attention_dropout)
 
     src_mask = tf.sequence_mask(features["source_length"],
                                 maxlen=tf.shape(encoder_output["annotation"])[1],
@@ -270,7 +317,6 @@ def encoding_graph(features, mode, params):
 
 
 def decoding_graph(features, state, mode, params):
-
     if mode != "train":
         params.dropout = 0.0
         params.rnn_dropout = 0.0
@@ -298,6 +344,9 @@ def decoding_graph(features, state, mode, params):
     cell = layers.rnn_cell.DL4MTGRULAUTransiLNCell(params.hidden_size, 1.0 - params.rnn_dropout)
     cell_cond = layers.rnn_cell.DL4MTGRULAUTransiLNCell(params.hidden_size, 1.0 - params.rnn_dropout)
 
+    compressed_gru_dec = layers.rnn_cell.LegacyGRUCell(params.hidden_size)
+    compressed_gru_cond = layers.rnn_cell.LegacyGRUCell(params.hidden_size)
+
     if params.use_variational_dropout:
         cell = tf.nn.rnn_cell.DropoutWrapper(
             cell,
@@ -314,17 +363,17 @@ def decoding_graph(features, state, mode, params):
         "source": features["source_length"],
         "target": features["target_length"]
     }
-   
+
     shifted_tgt_inputs = tf.pad(tgt_inputs, [[0, 0], [1, 0], [0, 0]])
     shifted_tgt_inputs = shifted_tgt_inputs[:, :-1, :]
     maxout_size = params.hidden_size // params.maxnum
 
     if mode != "infer":
-    	decoder_output = _decoder(cell_cond, cell, shifted_tgt_inputs, encoder_output["annotation"],
-                              	  length, initial_state)
+        decoder_output = _decoder(cell_cond, cell, shifted_tgt_inputs, encoder_output["annotation"],
+                                  length, initial_state)
     else:
-    	# Shift left
-    	shifted_tgt_inputs = tf.pad(tgt_inputs, [[0, 0], [1, 0], [0, 0]])
+        # Shift left
+        shifted_tgt_inputs = tf.pad(tgt_inputs, [[0, 0], [1, 0], [0, 0]])
         shifted_tgt_inputs = shifted_tgt_inputs[:, :-1, :]
         decoder_output = _decoder(cell_cond, cell, shifted_tgt_inputs[:, -1:, :], encoder_output["annotation"],
                                   length, initial_state, incre_state=state["decoder"])
@@ -347,7 +396,6 @@ def decoding_graph(features, state, mode, params):
         log_prob = tf.nn.log_softmax(logits)
 
         return log_prob, {"encoder": encoder_output, "initstate": initial_state, "decoder": decoder_output["state"]}
-
 
     shifted_outputs = decoder_output["outputs"]
 
@@ -394,11 +442,10 @@ def decoding_graph(features, state, mode, params):
 
 
 def model_graph(features, mode, params):
-
     encoder_output = encoding_graph(features, mode, params)
     state = {
-        "encoder": encoder_output[0], 
-	"initstate": encoder_output[1]
+        "encoder": encoder_output[0],
+        "initstate": encoder_output[1]
     }
     output = decoding_graph(features, state, mode, params)
 
@@ -449,15 +496,15 @@ class RNNsearch(interface.NMTModel):
 
             with tf.variable_scope(self._scope):
                 encoder_output = encoding_graph(features, "infer", params)
-        	batch = tf.shape(encoder_output[0]["annotation"])[0]
+                batch = tf.shape(encoder_output[0]["annotation"])[0]
                 state = {
                     "encoder": encoder_output[0],
                     "initstate": encoder_output[1],
-		    "decoder": encoder_output[1]
+                    "decoder": encoder_output[1]
                 }
             return state
-	
-	def decoding_fn(features, state, params=None):
+
+        def decoding_fn(features, state, params=None):
             if params is None:
                 params = copy.copy(self.parameters)
             else:
@@ -490,15 +537,15 @@ class RNNsearch(interface.NMTModel):
             hidden_size=1024,
             maxnum=1,
             # regularization
-            dropout=0.5,
-	    rnn_dropout=0.3,
+            dropout=0.2,
+            rnn_dropout=0.1,
             use_variational_dropout=False,
             label_smoothing=0.1,
             constant_batch_size=True,
             batch_size=128,
             max_length=100,
-            clip_grad_norm=5.0
+            clip_grad_norm=5.0,
+            attention_dropout=0.1
         )
 
         return params
-

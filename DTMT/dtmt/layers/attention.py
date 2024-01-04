@@ -43,7 +43,7 @@ def add_timing_signal(x, min_timescale=1.0, max_timescale=1.0e4, name=None):
         signal = tf.pad(signal, [[0, 0], [0, tf.mod(channels, 2)]])
         signal = tf.reshape(signal, [1, length, channels])
 
-	return x + signal * (tf.to_float(channels) ** -0.5)
+        return x + signal * (tf.to_float(channels) ** -0.5)
 
 
 def split_heads(inputs, num_heads, name=None):

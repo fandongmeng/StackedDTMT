@@ -89,12 +89,12 @@ def default_parameters():
 def merge_parameters(params1, params2):
     params = tf.contrib.training.HParams()
 
-    for (k, v) in params1.values().iteritems():
+    for (k, v) in params1.values().items():
         params.add_hparam(k, v)
 
     params_dict = params.values()
 
-    for (k, v) in params2.values().iteritems():
+    for (k, v) in params2.values().items():
         if k in params_dict:
             # Override
             setattr(params, k, v)
