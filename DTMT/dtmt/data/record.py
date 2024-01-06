@@ -53,7 +53,7 @@ def input_pipeline(file_pattern, mode, capacity=64):
             examples[field] = tensor
 
         # We do not want int64s as they do are not supported on GPUs.
-        return {k: tf.to_int32(v) for (k, v) in six.iteritems(examples)}
+        return {k: tf.to_int32(v) for (k, v) in six.items(examples)}
 
 
 def batch_examples(examples, batch_size, max_length, mantissa_bits,

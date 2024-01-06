@@ -55,7 +55,10 @@ def linear(inputs, output_size, bias, concat=True, dtype=None, scope=None):
 
         if bias:
             shape = [output_size]
-            bias = tf.get_variable("bias", shape, dtype=dtype)
+            if 'highway' in scope:
+                bias = tf.get_variable("bias", shape, dtype=dtype, initializer=tf.constant_initializer(-5))
+            else:
+                bias = tf.get_variable("bias", shape, dtype=dtype)
             output = tf.nn.bias_add(output, bias)
 
         output = tf.reshape(output, output_shape)

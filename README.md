@@ -26,8 +26,8 @@ sh run_test.sh
 
 ## Requirements
 
-+ tensorflow 1.10
-+ python 2.7 
++ tensorflow 1.15
++ python 3.6
 
 ## Citation
 

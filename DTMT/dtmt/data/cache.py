@@ -11,7 +11,7 @@ def cache_features(features, num_shards):
     if num_shards == 1:
         return features, tf.no_op(name="init_queue")
 
-    flat_features = list(features.itervalues())
+    flat_features = list(features.values())
     queue = tf.FIFOQueue(num_shards, dtypes=[v.dtype for v in flat_features])
     flat_features = [tf.split(v, num_shards, axis=0) for v in flat_features]
     flat_features = list(zip(*flat_features))
@@ -20,7 +20,7 @@ def cache_features(features, num_shards):
     flat_feature = queue.dequeue()
     new_features = {}
 
-    for k, v in zip(features.iterkeys(), flat_feature):
+    for k, v in zip(features.keys(), flat_feature):
         v.set_shape(features[k].shape)
         new_features[k] = v
 
